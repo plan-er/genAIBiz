@@ -75,6 +75,16 @@ def init_sqlite_db():
     con.commit()
     return con
 
+def get_diary_by_date(date: str) -> dict | None:
+    """指定された日付の日記をSQLiteから取得する"""
+    con = init_sqlite_db()
+    con.row_factory = sqlite3.Row
+    cursor = con.cursor()
+    cursor.execute("SELECT * FROM diary_entries WHERE date = ?", (date,))
+    row = cursor.fetchone()
+    con.close()
+    return dict(row) if row else None
+
 # --- メインロジック ---
 
 def ingest_diaries(diaries: List[DiaryEntry]):
