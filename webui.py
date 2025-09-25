@@ -17,7 +17,8 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from interpolate import call_interpolate
+from orchestrator import orchestrator_instance
+from schemas import InterpolationRequest
 
 # =========================
 # 設定
@@ -143,7 +144,37 @@ _do_interpolate = st.button("🔮 補間する", use_container_width=True)
 if _do_interpolate:
     date_iso = to_iso(date_val)
     with st.spinner("補間中..."):
-        result = call_interpolate(date_iso, hint_val)
+        try:
+            # orchestrator_instanceを使用して補間を実行
+            request = InterpolationRequest(date=date_iso, hint=hint_val)
+            response = orchestrator_instance.interpolate(request)
+            
+            # レスポンス形式をWebUIが期待する形式に変換
+            result = {
+                "source_text": "",  # orchestratorからは元の日記テキストは返らないため空
+                "interpolated_text": response.text,
+                "evidence": [{"type": "citation", "summary": f"参照: {c.date}", "source": c.snippet} for c in response.citations],
+                "meta": {"date": response.date},
+                "is_mock": False,
+            }
+        except Exception as e:
+            # エラー時はモックデータを返す
+            st.error(f"補間処理でエラーが発生しました: {e}")
+            result = {
+                "source_text": f"[{date_iso}] の原文は未記入です。ヒント: {hint_val or '（なし）'}",
+                "interpolated_text": f"""{date_iso} の出来事（自動補間）
+- 朝：曇りがち。通学路は静か。
+- 昼：研究を進め、結果を整理。
+- 夕：運動のあと読書でリフレッシュ。
+※ ヒント: {hint_val or '特になし'}""",
+                "evidence": [
+                    {"type": "weather", "summary": "当日の天候は曇りがち（例）", "source": "open-meteo (mock)"},
+                    {"type": "context", "summary": "前週の研究ログから活動推定（例）", "source": "local diary (mock)"},
+                ],
+                "meta": {"mock": True, "error": str(e)},
+                "is_mock": True,
+            }
+        
         st.session_state["last_result"] = result
         st.session_state["last_date_iso"] = date_iso
 
