@@ -12,7 +12,7 @@ INTERPOLATE_TEMPLATE_PATH = PROMPTS_DIR / "interpolate.md"
 STYLE_GUIDE_PATH = PROMPTS_DIR / "style_guide.md"
 
 BANNED_WORDS = {"超", "マジ", "ヤバい", "ヤベー", "まじで"}
-TIME_PREFIX_PATTERN = re.compile(r"^(朝|午前|午前中|昼|午後|夕方|夜|終日)(から|には|には|にかけて|まで|は)?")
+TIME_PREFIX_PATTERN = re.compile(r"^(朝|午前|午前中|昼|午後|夕方|夜|終日)(から|には|にかけて|まで|は|に)?")
 
 
 def _load_text(path: Path) -> str:
@@ -77,6 +77,8 @@ def _normalize_point(text: str) -> str:
     cleaned = re.sub(r"（.*?）", "", cleaned)
     cleaned = cleaned.replace("\u3000", " ").strip()
     cleaned = TIME_PREFIX_PATTERN.sub("", cleaned, count=1)
+    cleaned = re.sub(r"^(?:には|に|は|で|を|と|が|へ|も)\s*", "", cleaned)
+    cleaned = re.sub(r"^[、。,.\s]+", "", cleaned)
     return cleaned.strip("。．.、,")
 
 
@@ -99,6 +101,12 @@ def _fallback_generate(date: str, context: str, hint: str | None) -> str:
 
     hint_sentence = _safe_str(hint) or "特記事項は記録されていません。"
 
+    def _ensure_sentence(prefix: str, fragment: str, fallback_phrase: str) -> str:
+        normalized = fragment.strip().strip("。．. ")
+        if not normalized:
+            normalized = fallback_phrase
+        return f"{prefix}{normalized}。"
+
     paragraphs: list[str] = []
     lead = f"今日の出来事は提供された資料をもとに整理しました。{hint_sentence}".strip()
     if not lead.endswith("。"):
@@ -107,14 +115,17 @@ def _fallback_generate(date: str, context: str, hint: str | None) -> str:
 
     morning = key_points[0] if key_points else "静かに過ごしました"
     afternoon = key_points[1] if len(key_points) > 1 else "落ち着いた時間が流れました"
-    body = f"午前中は{morning}。午後は{afternoon}。"
+    body = (
+        _ensure_sentence("午前中は", morning, "静かに過ごしました")
+        + _ensure_sentence("午後は", afternoon, "落ち着いた時間が流れました")
+    )
     paragraphs.append(body)
 
     if len(key_points) > 2:
         closing_core = key_points[2]
     else:
         closing_core = "一日の終わりに簡単な振り返りを行い、記録を整えました"
-    summary = f"一日の締めくくりとして{closing_core}。"
+    summary = _ensure_sentence("一日の締めくくりとして", closing_core, "記録を整えました")
     paragraphs.append(summary)
 
     return "\n".join([date_header] + paragraphs)
@@ -183,6 +194,28 @@ def self_check(text: str, facts: Mapping[str, Any]) -> dict[str, Any]:
     checks.append(CheckResult("banned_words", banned_passed, detail))
     if not banned_passed:
         issues.append("禁則語を除去する")
+
+    lines = [line.rstrip() for line in text.splitlines()]
+    if lines:
+        header = lines[0].strip()
+        if expected_date:
+            expected_header = f"{expected_date} の記録"
+            header_ok = header == expected_header
+            header_detail = "見出し行が規定形式" if header_ok else f"見出しを『{expected_header}』に合わせる"
+            checks.append(CheckResult("header_format", header_ok, header_detail))
+            if not header_ok:
+                issues.append("見出し形式を修正する")
+
+        body_lines = lines[1:]
+        blank_line_found = any(not line.strip() for line in body_lines)
+        non_empty_count = sum(1 for line in body_lines if line.strip())
+        structure_passed = not blank_line_found and non_empty_count == 3
+        structure_detail = (
+            "本文3段落・空行なし" if structure_passed else "本文の段落数・空行を見直す"
+        )
+        checks.append(CheckResult("structure", structure_passed, structure_detail))
+        if not structure_passed:
+            issues.append("本文構成を整える")
 
     passed = not issues
     result = {
