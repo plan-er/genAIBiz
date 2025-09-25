@@ -7,22 +7,26 @@ from typing import Any, Mapping, Sequence
 import re
 import logging
 
+from langchain_huggingface import HuggingFaceEndpoint  # type: ignore[import-not-found]
+
 from config import (
     INTERPOLATION_MAX_NEW_TOKENS,
     INTERPOLATION_MODEL_NAME,
     INTERPOLATION_TEMPERATURE,
     INTERPOLATION_TOP_P,
+    INTERPOLATION_TASK,
+    HUGGINGFACEHUB_API_TOKEN,
 )
 
-try:
-    from transformers import pipeline  # type: ignore[import-not-found]
-except ImportError:  # pragma: no cover - ランタイム環境による
-    pipeline = None
+# try:
+#     from transformers import pipeline  # type: ignore[import-not-found]
+# except ImportError:  # pragma: no cover - ランタイム環境による
+#     pipeline = None
 
-try:  # pragma: no cover - optional dependency
-    import torch  # type: ignore[import-not-found]
-except ImportError:  # pragma: no cover - ランタイム環境による
-    torch = None
+# try:  # pragma: no cover - optional dependency
+#     import torch  # type: ignore[import-not-found]
+# except ImportError:  # pragma: no cover - ランタイム環境による
+#     torch = None
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 INTERPOLATE_TEMPLATE_PATH = PROMPTS_DIR / "interpolate.md"
@@ -91,49 +95,78 @@ def build_context(passages: Sequence[Any]) -> str:
     return "\n".join(lines)
 
 
+# @lru_cache(maxsize=1)
+# def _get_generation_pipeline(model_name: str):
+#     if pipeline is None:
+#         raise ImportError(
+#             "transformers is not installed. Install the optional dependencies to enable LLM generation."
+#         )
+#
+#     device = 0 if (torch is not None and torch.cuda.is_available()) else -1
+#     model_kwargs = {}
+#     if torch is not None and torch.cuda.is_available():
+#         model_kwargs["torch_dtype"] = torch.float16
+#
+#     text_gen = pipeline(
+#         task="text-generation",
+#         model=model_name,
+#         device=device,
+#         model_kwargs=model_kwargs,
+#     )
+#
+#     tokenizer = text_gen.tokenizer
+#     pad_token_id = tokenizer.pad_token_id
+#     if pad_token_id is None and tokenizer.eos_token_id is not None:
+#         pad_token_id = tokenizer.eos_token_id
+#     if pad_token_id is None:
+#         pad_token_id = 0
+#
+#     return text_gen, pad_token_id
+#
+#
+# def _call_llm(prompt: str) -> str:
+#     generator, pad_token_id = _get_generation_pipeline(INTERPOLATION_MODEL_NAME)
+#     outputs = generator(
+#         prompt,
+#         max_new_tokens=INTERPOLATION_MAX_NEW_TOKENS,
+#         temperature=INTERPOLATION_TEMPERATURE,
+#         top_p=INTERPOLATION_TOP_P,
+#         do_sample=True,
+#         return_full_text=False,
+#         pad_token_id=pad_token_id,
+#     )
+#     if not outputs:
+#         return ""
+#     return outputs[0].get("generated_text", "")
+
+
 @lru_cache(maxsize=1)
-def _get_generation_pipeline(model_name: str):
-    if pipeline is None:
-        raise ImportError(
-            "transformers is not installed. Install the optional dependencies to enable LLM generation."
+def _get_llm(model_name: str) -> HuggingFaceEndpoint:
+    if not HUGGINGFACEHUB_API_TOKEN:
+        raise RuntimeError(
+            "HUGGINGFACEHUB_API_TOKEN is not set. Provide a token to use Hugging Face endpoint via LangChain."
         )
 
-    device = 0 if (torch is not None and torch.cuda.is_available()) else -1
-    model_kwargs = {}
-    if torch is not None and torch.cuda.is_available():
-        model_kwargs["torch_dtype"] = torch.float16
-
-    text_gen = pipeline(
-        task="text-generation",
-        model=model_name,
-        device=device,
-        model_kwargs=model_kwargs,
+    return HuggingFaceEndpoint(
+        repo_id=model_name,
+        task=INTERPOLATION_TASK,
+        huggingfacehub_api_token=HUGGINGFACEHUB_API_TOKEN,
+        model_kwargs={
+            "max_new_tokens": INTERPOLATION_MAX_NEW_TOKENS,
+            "temperature": INTERPOLATION_TEMPERATURE,
+            "top_p": INTERPOLATION_TOP_P,
+        },
     )
-
-    tokenizer = text_gen.tokenizer
-    pad_token_id = tokenizer.pad_token_id
-    if pad_token_id is None and tokenizer.eos_token_id is not None:
-        pad_token_id = tokenizer.eos_token_id
-    if pad_token_id is None:
-        pad_token_id = 0
-
-    return text_gen, pad_token_id
 
 
 def _call_llm(prompt: str) -> str:
-    generator, pad_token_id = _get_generation_pipeline(INTERPOLATION_MODEL_NAME)
-    outputs = generator(
-        prompt,
-        max_new_tokens=INTERPOLATION_MAX_NEW_TOKENS,
-        temperature=INTERPOLATION_TEMPERATURE,
-        top_p=INTERPOLATION_TOP_P,
-        do_sample=True,
-        return_full_text=False,
-        pad_token_id=pad_token_id,
-    )
-    if not outputs:
-        return ""
-    return outputs[0].get("generated_text", "")
+    llm = _get_llm(INTERPOLATION_MODEL_NAME)
+    result = llm.invoke(prompt)
+    if isinstance(result, str):
+        return result
+    if isinstance(result, Mapping) and "generated_text" in result:
+        return _safe_str(result.get("generated_text"))
+    return _safe_str(result)
 
 
 def _normalize_point(text: str) -> str:

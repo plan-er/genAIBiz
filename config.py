@@ -1,5 +1,16 @@
 import os
-from dotenv import load_dotenv
+import importlib
+
+
+def _resolve_load_dotenv():
+    dotenv_spec = importlib.util.find_spec("dotenv")
+    if dotenv_spec is None:
+        return lambda *_args, **_kwargs: False
+    dotenv_module = importlib.import_module("dotenv")
+    return getattr(dotenv_module, "load_dotenv", lambda *_args, **_kwargs: False)
+
+
+load_dotenv = _resolve_load_dotenv()
 
 # .envファイルから環境変数を読み込む
 load_dotenv()
@@ -37,4 +48,6 @@ INTERPOLATION_MODEL_NAME = os.environ.get(
 INTERPOLATION_MAX_NEW_TOKENS = int(os.environ.get("INTERPOLATION_MAX_NEW_TOKENS", "320"))
 INTERPOLATION_TEMPERATURE = float(os.environ.get("INTERPOLATION_TEMPERATURE", "0.7"))
 INTERPOLATION_TOP_P = float(os.environ.get("INTERPOLATION_TOP_P", "0.9"))
+INTERPOLATION_TASK = os.environ.get("INTERPOLATION_TASK", "text-generation")
+HUGGINGFACEHUB_API_TOKEN = os.environ.get("HUGGINGFACEHUB_API_TOKEN")
 
