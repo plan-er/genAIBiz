@@ -1,11 +1,28 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
-import datetime as dt
+from typing import Any, Mapping, Sequence
 import re
-import textwrap
+import logging
+
+from config import (
+    INTERPOLATION_MAX_NEW_TOKENS,
+    INTERPOLATION_MODEL_NAME,
+    INTERPOLATION_TEMPERATURE,
+    INTERPOLATION_TOP_P,
+)
+
+try:
+    from transformers import pipeline  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover - ランタイム環境による
+    pipeline = None
+
+try:  # pragma: no cover - optional dependency
+    import torch  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover - ランタイム環境による
+    torch = None
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 INTERPOLATE_TEMPLATE_PATH = PROMPTS_DIR / "interpolate.md"
@@ -13,6 +30,8 @@ STYLE_GUIDE_PATH = PROMPTS_DIR / "style_guide.md"
 
 BANNED_WORDS = {"超", "マジ", "ヤバい", "ヤベー", "まじで"}
 TIME_PREFIX_PATTERN = re.compile(r"^(朝|午前|午前中|昼|午後|夕方|夜|終日)(から|には|にかけて|まで|は|に)?")
+
+_logger = logging.getLogger(__name__)
 
 
 def _load_text(path: Path) -> str:
@@ -72,6 +91,51 @@ def build_context(passages: Sequence[Any]) -> str:
     return "\n".join(lines)
 
 
+@lru_cache(maxsize=1)
+def _get_generation_pipeline(model_name: str):
+    if pipeline is None:
+        raise ImportError(
+            "transformers is not installed. Install the optional dependencies to enable LLM generation."
+        )
+
+    device = 0 if (torch is not None and torch.cuda.is_available()) else -1
+    model_kwargs = {}
+    if torch is not None and torch.cuda.is_available():
+        model_kwargs["torch_dtype"] = torch.float16
+
+    text_gen = pipeline(
+        task="text-generation",
+        model=model_name,
+        device=device,
+        model_kwargs=model_kwargs,
+    )
+
+    tokenizer = text_gen.tokenizer
+    pad_token_id = tokenizer.pad_token_id
+    if pad_token_id is None and tokenizer.eos_token_id is not None:
+        pad_token_id = tokenizer.eos_token_id
+    if pad_token_id is None:
+        pad_token_id = 0
+
+    return text_gen, pad_token_id
+
+
+def _call_llm(prompt: str) -> str:
+    generator, pad_token_id = _get_generation_pipeline(INTERPOLATION_MODEL_NAME)
+    outputs = generator(
+        prompt,
+        max_new_tokens=INTERPOLATION_MAX_NEW_TOKENS,
+        temperature=INTERPOLATION_TEMPERATURE,
+        top_p=INTERPOLATION_TOP_P,
+        do_sample=True,
+        return_full_text=False,
+        pad_token_id=pad_token_id,
+    )
+    if not outputs:
+        return ""
+    return outputs[0].get("generated_text", "")
+
+
 def _normalize_point(text: str) -> str:
     cleaned = re.sub(r"^[0-9]+[\.)、\-]\s*", "", text)
     cleaned = re.sub(r"（.*?）", "", cleaned)
@@ -128,6 +192,12 @@ def _fallback_generate(date: str, context: str, hint: str | None) -> str:
     summary = _ensure_sentence("一日の締めくくりとして", closing_core, "記録を整えました")
     paragraphs.append(summary)
 
+    filler_sentence = "全体として落ち着いた雰囲気で、記録の整理と次の準備に時間を充てました。"
+    body_text = "".join(paragraphs)
+    while len(body_text) < 210 and len(body_text) + len(filler_sentence) <= 280:
+        paragraphs[-1] = paragraphs[-1].rstrip("。") + "。" + filler_sentence
+        body_text = "".join(paragraphs)
+
     return "\n".join([date_header] + paragraphs)
 
 
@@ -144,9 +214,24 @@ def generate_interpolation(date: str, context: str, hint: str | None) -> str:
         style_guide=style_guide,
     )
 
-    # 現段階では deterministic なフォールバックで返す
-    generated = _fallback_generate(date, context, hint)
-    return generated.strip()
+    generated_text = ""
+
+    try:
+        generated_text = _call_llm(prompt)
+    except Exception as exc:  # pragma: no cover - LLM依存のため
+        _logger.warning("LLM generation failed (%s). Falling back to rule-based output.", exc)
+
+    if not generated_text.strip():
+        generated_text = _fallback_generate(date, context, hint)
+    else:
+        check = self_check(generated_text, {"date": date})
+        if not check.get("passed", False):
+            _logger.info("Self-check failed: %s", check)
+            fallback = _fallback_generate(date, context, hint)
+            if fallback:
+                generated_text = fallback
+
+    return generated_text.strip()
 
 
 @dataclass
@@ -216,6 +301,21 @@ def self_check(text: str, facts: Mapping[str, Any]) -> dict[str, Any]:
         checks.append(CheckResult("structure", structure_passed, structure_detail))
         if not structure_passed:
             issues.append("本文構成を整える")
+
+        if body_lines:
+            body_text = "".join(body_lines)
+            body_len = len(body_text)
+            len_passed = 200 <= body_len <= 280
+            len_detail = "本文文字数が規定範囲" if len_passed else f"本文文字数を200〜280字に調整する (現在{body_len}字)"
+            checks.append(CheckResult("length", len_passed, len_detail))
+            if not len_passed:
+                issues.append("本文文字数を調整する")
+
+            punctuation_ok = not any(ch in body_text for ch in "!?！？")
+            punctuation_detail = "禁則記号なし" if punctuation_ok else "感嘆符・疑問符などを削除"
+            checks.append(CheckResult("punctuation", punctuation_ok, punctuation_detail))
+            if not punctuation_ok:
+                issues.append("禁則記号を削除する")
 
     passed = not issues
     result = {

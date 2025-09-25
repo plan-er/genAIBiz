@@ -1,5 +1,6 @@
 from retriever import retriever_instance
 from schemas import InterpolationRequest, InterpolationResponse, Citation
+from rag_chain import build_context, generate_interpolation
 
 class Orchestrator:
     def interpolate(self, req: InterpolationRequest) -> InterpolationResponse:
@@ -16,24 +17,17 @@ class Orchestrator:
                 citations=[]
             )
 
-        # 2. RAG Chainでプロンプトを組み立て、LLMで生成（現在はスタブ）
-        # (担当Aがrag_chain.pyに実装)
-        # rag_chain.generate_interpolation(...)
-
-        # ▼▼▼【修正点】辞書のキーアクセスを p.text から p['text'] に変更▼▼▼
-        # スタブの応答を作成
-        context_for_stub = "\n".join([p['text'] for p in passages])
-        text = f"（AIによる生成結果）\n日付: {req.date}\nヒント: {req.hint}\n---\n[参照した過去の記憶]\n{context_for_stub}"
+        # 2. RAG Chainでプロンプトを組み立て、LLMで生成
+        context = build_context(passages)
+        text = generate_interpolation(req.date, context, req.hint)
 
         # 3. レスポンスを構築
-        citations = [
-            Citation(
-                snippet=p['text'][:100] + "...", 
-                date=p['metadata']["date"]
-            )
-            for p in passages
-        ]
-        # ▲▲▲【修正ここまで】▲▲▲
+        citations = []
+        for passage in passages:
+            metadata = passage.get("metadata", {}) if isinstance(passage, dict) else {}
+            snippet = passage.get("text", "")[:100] + "..." if isinstance(passage, dict) else ""
+            citation_date = metadata.get("date", req.date)
+            citations.append(Citation(snippet=snippet, date=citation_date))
 
         return InterpolationResponse(
             date=req.date,
